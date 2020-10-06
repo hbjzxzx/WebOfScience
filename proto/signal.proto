@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package tools.cn;
+
+option go_package = ".;pb";
+
+enum AddressType {
+    HostName = 0;
+    Ipv4 = 1;
+}
+
+message ConnectRequest {
+    string Address = 1;
+    string Port = 2;
+    AddressType AddressType = 3;
+}
+
+message ConnectResponse {
+    string BindAddress = 1;
+    string BindPort = 2;
+    AddressType AType = 3;
+    bytes MagicToken = 4;
+    string MagicPort = 5;
+}
+
+service WebOfScience {
+    rpc Request(ConnectRequest) returns (ConnectResponse) {}
+}
