@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"web/of/science/pb"
+	"web/of/science/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -78,30 +79,46 @@ func (c *clientType1) OnRequest(address, port string, atype pb.AddressType, conn
 		return
 	}
 	defer proxy_link.Close()
-	ipbytes := []byte(net.ParseIP(bindAddress))
-	var buffer bytes.Buffer
-	buffer.Write([]byte{0x05, 0x00, 0x00, 0x01}[:4])
+	//fmt.Println(bindAddress)
+	ipBytes := []byte(net.ParseIP(bindAddress))[12:]
+	//fmt.Println(ipBytes)
+	prefixBytes := []byte{0x05, 0x00, 0x00, 0x01}
+
 	intPort, err := strconv.Atoi(bindPort)
 	iport := int16(intPort)
+	portBytes := []byte{byte(iport), byte(iport >> 8)}
 
-	buffer.Write(ipbytes)
-	buffer.Write([]byte{byte(iport), byte(iport >> 8)})
-
-	bbb := buffer.Bytes()
-	fmt.Println(len(bbb))
-	ccc := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-	conn.Write(ccc)
-	fmt.Println("len: ", len(ccc))
-	fmt.Println(ccc)
-	fmt.Println(ccc[:9])
+	responBytes := bytes.Join([][]byte{prefixBytes, ipBytes, portBytes}, []byte{})
+	//fmt.Println(responBytes)
+	conn.Write(responBytes)
 
 	//proxy_link.Write(magicToken)
-	go io.Copy(proxy_link, conn)
-	io.Copy(conn, proxy_link)
+
+	//go io.Copy(proxy_link, conn)
+	//_, err = io.Copy(conn, proxy_link)
 	//go copy(proxy_link, conn, "reveive", true)
 	//copy(conn, proxy_link, "send", false)
+	//log.Printf("link down: %v", err)
 
-	log.Printf("exit a link")
+	inputByteCnt := make(chan int64, 1)
+	outputByteCnt := make(chan int64, 1)
+
+	bsize := utils.GetBlockSize()
+	encrypt := utils.AesEncrypt
+	go utils.Forward(conn, proxy_link, outputByteCnt, bsize, encrypt)
+	err = utils.Forward(proxy_link, conn, inputByteCnt, bsize, encrypt)
+	//inBytes := utils.Int64ToKB(<-inputByteCnt)
+	//outBytes := utils.Int64ToKB(<-outputByteCnt)
+
+	inBytes := <-inputByteCnt
+	outBytes := <-outputByteCnt
+	linkStr := fmt.Sprintf("request to %v:%v, proxy by %v:%v", address, port, bindAddress, bindPort)
+	//flowStr := fmt.Sprintf("flowout:%.2f KB flowin:%.2f KB", outBytes, inBytes)
+	flowStr := fmt.Sprintf("flowout:%d B flowin:%d B", outBytes, inBytes)
+	if err != nil {
+		log.Printf("link down abnormal: %v  (%v)", err, linkStr)
+	}
+	log.Printf("link(%v) exit; flow: %v", linkStr, flowStr)
 
 }
 

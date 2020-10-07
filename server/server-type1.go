@@ -3,10 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
+	"time"
 	"web/of/science/pb"
+	"web/of/science/utils"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,7 +15,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var localIP string
+var (
+	localIP   string
+	CurListen int64
+)
 
 func GetOutboundIP() net.IP {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
@@ -41,28 +45,66 @@ type serverType1 struct {
 	address, port    string
 }
 
-func proxyWorker(lis net.Listener, magic []byte, remoteConn net.Conn) {
-	defer lis.Close()
+func proxyWorker(lis net.Listener, magic []byte, remoteConn net.Conn, address, port string) {
 	defer remoteConn.Close()
-	conn, err := lis.Accept()
-	if err != nil {
-		log.Print(err)
+	defer lis.Close()
+	listenport := fmt.Sprintf("%d", (lis.Addr().(*net.TCPAddr).Port))
+	conChannel := make(chan net.Conn)
+	go func() {
+		log.Printf("port %v waiting for client which request connection:%v:%v", listenport, address, port)
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				log.Printf("port %v waiting for client which request connection:%v:%v failed", listenport, address, port)
+				return
+			}
+			conChannel <- conn
+			return
+		}
+	}()
+	select {
+	case conn := <-conChannel:
+		log.Printf("port %v waiting for client which request connection:%v:%v success", listenport, address, port)
+		defer conn.Close()
+
+		//go io.Copy(conn, remoteConn)
+		//io.Copy(remoteConn, conn)
+
+		inputByteCnt := make(chan int64, 1)
+		outputByteCnt := make(chan int64, 1)
+
+		bsize := utils.GetBlockSize()
+		encrypt := utils.AesEncrypt
+		go utils.Forward(conn, remoteConn, outputByteCnt, bsize, encrypt)
+		err := utils.Forward(remoteConn, conn, inputByteCnt, bsize, encrypt)
+		//inBytes := utils.Int64ToKB(<-inputByteCnt)
+		//outBytes := utils.Int64ToKB(<-outputByteCnt)
+
+		inBytes := <-inputByteCnt
+		outBytes := <-outputByteCnt
+		//linkStr := fmt.Sprintf("request to %v:%v, proxy by %v:%v", address, port, bindAddress, bindPort)
+		//flowStr := fmt.Sprintf("flowout:%.2f KB flowin:%.2f KB", outBytes, inBytes)
+		flowStr := fmt.Sprintf("flowout:%d B flowin:%d B", outBytes, inBytes)
+		if err != nil {
+			log.Printf("link down abnormal: %v", err)
+		}
+		log.Printf("link down %s", flowStr)
+		//log.Printf("link(%v) exit; flow: %v", linkStr, flowStr)
+
+		return
+	case <-time.NewTimer(10 * time.Second).C:
+		log.Printf("port %v waiting for client which request connection:%v:%v failed time out", listenport, address, port)
 		return
 	}
-	log.Printf("client tcp in !")
-	defer conn.Close()
-	go io.Copy(conn, remoteConn)
-	io.Copy(remoteConn, conn)
 }
 
 //Request on server handle client Request
 func (s *serverType1) Request(ctx context.Context, cr *pb.ConnectRequest) (*pb.ConnectResponse, error) {
 	address := cr.GetAddress()
 	port := cr.GetPort()
-	aType := cr.GetAddressType()
-	log.Printf("new connection Request %v:%v, %v", address, port, aType)
+	//aType := cr.GetAddressType()
 
-	remoteConn, err := net.Dial("tcp", fmt.Sprintf("%v:%v", address, port))
+	remoteConn, err := net.Dial("tcp4", fmt.Sprintf("%v:%v", address, port))
 	if err != nil {
 		log.Printf("%v:%v can not reach", address, port)
 		return nil, fmt.Errorf("%v:%v can not reach", address, port)
@@ -71,12 +113,16 @@ func (s *serverType1) Request(ctx context.Context, cr *pb.ConnectRequest) (*pb.C
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		log.Printf("listen failed for %v:%v", address, port)
+		remoteConn.Close()
 		return nil, fmt.Errorf("error to open new listening")
 	}
+	//CurListen++
 	portStr := fmt.Sprintf("%d", (listener.Addr().(*net.TCPAddr).Port))
-	log.Printf("listen port %v", portStr)
+	//log.Printf("listen port %v", portStr)
 	bindPort := fmt.Sprintf("%d", remoteConn.LocalAddr().(*net.TCPAddr).Port)
-	go proxyWorker(listener, []byte{0x01}, remoteConn)
+
+	go proxyWorker(listener, []byte{0x01}, remoteConn, address, port)
+
 	r := pb.ConnectResponse{
 		BindAddress: localIP,
 		BindPort:    bindPort,
